@@ -1,0 +1,186 @@
+# 6-Bus Power System Analysis - CORRECTED with proper B values
+import pandapower as pp
+import pandas as pd
+import numpy as np
+
+print("=== 6-BUS POWER SYSTEM ANALYSIS ===")
+
+# 1. Create empty network with 100 MVA base
+net = pp.create_empty_network(sn_mva=100)
+
+# 2. Create 6 buses (working in per-unit, so vn_kv=1.0)
+buses = []
+for i in range(6):
+    bus = pp.create_bus(net, vn_kv=1.0, name=f"Bus {i+1}")
+    buses.append(bus)
+
+b1, b2, b3, b4, b5, b6 = buses
+
+# 3. Add slack bus (Bus 1) - Table 3
+pp.create_ext_grid(net, b1, vm_pu=1.06, va_degree=0.0, name="Slack Bus 1")
+
+# 4. Add PV buses (generators at Bus 2 and 3) - Table 3
+pp.create_gen(net, b2, p_mw=150, vm_pu=1.04, 
+              min_q_mvar=0, max_q_mvar=140, 
+              controllable=True, name="Gen Bus 2")
+
+pp.create_gen(net, b3, p_mw=100, vm_pu=1.03, 
+              min_q_mvar=0, max_q_mvar=90, 
+              controllable=True, name="Gen Bus 3")
+
+# 5. Add loads - Table 4
+pp.create_load(net, b4, p_mw=100, q_mvar=70, name="Load Bus 4")
+pp.create_load(net, b5, p_mw=90, q_mvar=30, name="Load Bus 5")
+pp.create_load(net, b6, p_mw=160, q_mvar=110, name="Load Bus 6")
+
+# 6. Add transmission lines and transformers - Table 1
+# CORRECTED: Using actual values from table (note the decimal places!)
+line_data = [
+    # (from, to, r_pu, x_pu, half_b_pu, name)
+    (b1, b4, 0.035, 0.225, 0.0065, "Line 1-4"),
+    (b1, b5, 0.025, 0.105, 0.0045, "Line 1-5"),
+    (b1, b6, 0.040, 0.215, 0.0055, "Line 1-6"),
+    (b2, b4, 0.000, 0.035, 0.0000, "Trafo 2-4"),
+    (b3, b5, 0.000, 0.042, 0.0000, "Trafo 3-5"),
+    (b4, b6, 0.028, 0.125, 0.0035, "Line 4-6"),
+    (b5, b6, 0.026, 0.175, 0.0300, "Line 5-6"),  # Note: 0.0300, not 0.035!
+]
+
+print("Creating network components...")
+
+for from_bus, to_bus, r_pu, x_pu, half_b_pu, line_name in line_data:
+    pp.create_impedance(
+        net, 
+        from_bus, 
+        to_bus,
+        rft_pu=r_pu,
+        xft_pu=x_pu,
+        sn_mva=100,
+        rtf_pu=r_pu,
+        xtf_pu=x_pu,
+        name=line_name
+    )
+    
+    # Add shunt admittance (line charging) if B is non-zero
+    # Total B = 2 * (½B), so susceptance in Mvar = 2 * half_b_pu * 100 MVA
+    if half_b_pu > 0:
+        # Capacitive susceptance generates positive reactive power
+        # In pandapower, positive q_mvar means consuming reactive power
+        # So we use negative to represent generation (capacitive)
+        b_total_mvar = 2 * half_b_pu * 100
+        pp.create_shunt(net, from_bus, q_mvar=-b_total_mvar, p_mw=0, name=f"Shunt {line_name} (from)")
+        pp.create_shunt(net, to_bus, q_mvar=-b_total_mvar, p_mw=0, name=f"Shunt {line_name} (to)")
+
+print("✓ Network created successfully!")
+print(f"\nSystem Summary:")
+print(f"  Buses: {len(net.bus)}")
+print(f"  Generators: 1 slack + {len(net.gen)} PV")
+print(f"  Loads: {len(net.load)}")
+print(f"  Impedances: {len(net.impedance)}")
+print(f"  Shunts: {len(net.shunt)}")
+
+print(f"\nPower Balance (scheduled):")
+print(f"  Generation (scheduled): 150 + 100 = 250 MW")
+print(f"  Load: 100 + 90 + 160 = 350 MW")
+print(f"  Slack bus must supply: ~100 MW + losses")
+
+# 7. Run Load Flow
+print("\n" + "="*60)
+print("RUNNING LOAD FLOW ANALYSIS")
+print("="*60)
+
+converged = False
+algorithms = [
+    ('nr', {'init': 'dc'}),
+    ('nr', {'init': 'flat'}),
+    ('bfsw', {}),
+]
+
+for algo, kwargs in algorithms:
+    try:
+        print(f"\nAttempting with algorithm: '{algo}' (init: {kwargs.get('init', 'default')})")
+        pp.runpp(net, algorithm=algo, numba=False, max_iteration=100, **kwargs)
+        converged = True
+        print(f"✓ CONVERGED!")
+        break
+    except Exception as e:
+        print(f"✗ Failed: {str(e)[:80]}")
+
+if converged:
+    print("\n" + "="*60)
+    print("LOAD FLOW RESULTS")
+    print("="*60)
+    
+    # Bus Voltages
+    print("\n1. BUS VOLTAGES")
+    print("-" * 60)
+    print(f"{'Bus':<10} {'Voltage (pu)':<15} {'Angle (degrees)':<20}")
+    print("-" * 60)
+    for i in range(6):
+        v_mag = net.res_bus.vm_pu.iloc[i]
+        v_ang = net.res_bus.va_degree.iloc[i]
+        print(f"Bus {i+1:<5} {v_mag:>10.4f}      {v_ang:>15.2f}")
+    
+    # Generator Outputs
+    print("\n2. GENERATOR REAL AND REACTIVE POWER")
+    print("-" * 60)
+    print(f"{'Generator':<15} {'P (MW)':<12} {'Q (Mvar)':<12}")
+    print("-" * 60)
+    
+    p_slack = net.res_ext_grid.p_mw.iloc[0]
+    q_slack = net.res_ext_grid.q_mvar.iloc[0]
+    print(f"Slack (Bus 1)   {p_slack:>10.2f}  {q_slack:>10.2f}")
+    
+    for idx in range(len(net.gen)):
+        bus_num = net.gen.bus.iloc[idx] + 1
+        p = net.res_gen.p_mw.iloc[idx]
+        q = net.res_gen.q_mvar.iloc[idx]
+        print(f"Gen (Bus {bus_num})     {p:>10.2f}  {q:>10.2f}")
+    
+    # Power Balance
+    print("\n3. SYSTEM POWER BALANCE")
+    print("-" * 60)
+    total_gen_p = p_slack + net.res_gen.p_mw.sum()
+    total_gen_q = q_slack + net.res_gen.q_mvar.sum()
+    total_load_p = net.res_load.p_mw.sum()
+    total_load_q = net.res_load.q_mvar.sum()
+    total_loss_p = total_gen_p - total_load_p
+    
+    print(f"Total Generation:  P = {total_gen_p:>8.2f} MW,  Q = {total_gen_q:>8.2f} Mvar")
+    print(f"Total Load:        P = {total_load_p:>8.2f} MW,  Q = {total_load_q:>8.2f} Mvar")
+    print(f"Total Losses:      P = {total_loss_p:>8.2f} MW  ({total_loss_p/total_gen_p*100:.2f}%)")
+    
+    # Line Flows
+    print("\n4. LINE POWER FLOWS")
+    print("-" * 60)
+    print(f"{'Line':<15} {'P_from (MW)':<15} {'Q_from (Mvar)':<15} {'Loss (MW)':<12}")
+    print("-" * 60)
+    for idx in range(len(net.impedance)):
+        line_name = net.impedance.name.iloc[idx]
+        # Note: impedance elements don't have standard result tables like lines
+        # This is a limitation of using impedance vs line elements
+        print(f"{line_name:<15} (use line elements for detailed flow data)")
+    
+    # Save to Excel
+    print("\n" + "="*60)
+    results_df = pd.DataFrame({
+        'Bus': [f'Bus {i+1}' for i in range(6)],
+        'Voltage (pu)': net.res_bus.vm_pu.round(4),
+        'Angle (degrees)': net.res_bus.va_degree.round(2)
+    })
+    
+    results_df.to_excel('load_flow_results.xlsx', index=False)
+    print("✓ Results saved to 'load_flow_results.xlsx'")
+    
+    print("\n" + "="*60)
+    print("SUCCESS! Load flow analysis complete.")
+    print("="*60)
+    
+else:
+    print("\n" + "="*60)
+    print("ERROR: Load flow did not converge")
+    print("="*60)
+    print("\nTroubleshooting suggestions:")
+    print("1. Verify all data from PDF tables is correct")
+    print("2. Check if system is feasible (sufficient generation)")
+    print("3. Try adjusting convergence parameters")
