@@ -1,5 +1,7 @@
 # Power-System
 System analysis using python code
+
+
 Problem 1-
 
 This is a university assignment document about analyzing an electrical power system. The project involves studying a small model power grid with 6 connection points (called "buses") and performing two types of technical analyses on it. The student must write a computer program, produce results, and then explain their work in a report and oral examination.
